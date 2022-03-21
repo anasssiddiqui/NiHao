@@ -1,0 +1,363 @@
+const { totp } = require("otplib");
+const { otpSecret } = require("../utility/config");
+const secret = otpSecret || "";
+const { ObjectId } = require("mongoose").Types;
+const { otpDigits, otpPeriod, s3BaseUrl } = require("../utility/config");
+const randomString = require("randomstring");
+const domains = require("disposable-email-domains");
+const jwt = require("jsonwebtoken");
+const { jwtSecret } = require("../utility/config");
+const { Unauthorized } = require("../utility/apiError");
+
+let firebaseAdmin = require("firebase-admin");
+const { SERVER_KEY } = require("../utility/config");//fcm server key provided by fcm account
+const serviceAccount = require('../firebase/ni-hao-35cca-firebase-adminsdk-daays-f4e6144680.json');//serviceAccount provided by fcm account
+
+const firebaseApp = firebaseAdmin.initializeApp({
+  credential: firebaseAdmin.credential.cert(serviceAccount),
+  databaseURL: SERVER_KEY,
+});
+
+/**
+ * @description - This function is used to create firebase notification template for multiple user
+ */
+
+const sendNotificationsTemplate = ({ fcmToken, data, message }) => {
+  let messageFormat = {
+    data,
+    notification: {
+      title: 'Important Notification from Boome',
+      body: message,
+    },
+    tokens: fcmToken,
+  };
+  return messageFormat;
+};
+
+
+/**
+ * @description - This function is used to create firebase notification template for single user
+ */
+
+const sendNotificationTemplate = ({ fcmToken, data, message }) => {
+  let messageFormat = {
+    notification: {
+      title: 'Ni hao notification',
+      body: message,
+    },
+    token: fcmToken,
+  };
+  if (data)
+    messageFormat.data = data
+  return messageFormat;
+};
+
+/**
+ * @description - This function is used to send notification multiple or single user 
+ * @param {string} fcmToken  - recevier fcm token
+ * @param {Object} data  - data which we need to send client side
+ * @param {string} message  - message which we need to send client side
+ * @returns {bolean} - Return an true or false
+ */
+
+const sendNotification = async ({ fcmToken, data, message }) => {
+  if (typeof fcmToken == 'string') {
+    var messageContent = sendNotificationTemplate({ fcmToken, data, message })
+    firebaseApp.messaging().send(messageContent)
+      .then((response) => {
+        const resData = `${response.successCount} messages were sent successfully`;
+        console.log(resData);
+        return
+      }).catch(error => {
+        console.log(error);
+      });
+  } else {
+    var messageContent = sendNotificationsTemplate({ fcmToken, data, message })
+    firebaseApp.messaging().sendMulticast(messageContent)
+      .then((response) => {
+        const resData = `${response.successCount} messages were sent successfully`;
+        console.log(resData);
+        return
+      }).catch(error => {
+        console.log(error);
+      });
+  }
+
+};
+
+
+/**
+ * @returns {dateFormat} - This return converted  dynamic date from this '2022-02-24T05:44:05.189Z' to this '24-feb-2022'
+ */
+
+const filterDate = ({ date }) => {
+  const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sept", "Oct", "Nov", "Dec"];
+  var ddmmyyFormat = date.getDate() + '-' + (monthNames[date.getMonth()]) + '-' + date.getFullYear()
+  return { ddmmyyFormat }
+};
+
+/**
+ * @returns {dateFormat} - This return converted  current date from this '2022-02-24T05:44:05.189Z' to this '24-feb-2022'
+ */
+
+const humanDate = ({ }) => {
+  const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sept", "Oct", "Nov", "Dec"];
+  date = new Date();
+  var dateFormat = date.getDate() + '-' + (monthNames[date.getMonth()]) + '-' + date.getFullYear()
+  return { dateFormat }
+};
+
+/**
+ * @param {number} duration  - The month in number
+ * @returns {Timestamp} - This returns the future timestamp after adding months duration to it
+ */
+
+const futureTimestamp = ({ duration }) => {
+  var d = new Date();
+  console.log(d.toLocaleDateString());
+  d.setMonth(d.getMonth() + duration);
+  var expiryDate = d / 1000 | 0
+  return { expiryDate }
+};
+
+/**
+ * @description - This function is used to Generate an otp code/token
+ * @param {number} period  - Expiry Time in Seconds
+ * @param {number} digits  - Number of character/digits in otp
+ * @param {string} userId  - _id of the user record
+ * @returns {string} - Return an otp
+ */
+
+const generateToken = ({
+  period = otpPeriod,
+  digits = otpDigits,
+  userId = "",
+}) => {
+  const options = {
+    step: period,
+    digits,
+    epoch: Date.now(),
+  };
+  totp.options = options;
+  return totp.generate(secret + String(userId));
+};
+
+/**
+ * @description - This Function is used to generate the token
+ */
+
+const generateJWTToken = async ({ payload = {}, secret = "", expiresIn = '1h' }) => {
+  const token = await jwt.sign(
+    payload,
+    secret,
+    { expiresIn }
+  );
+  return token
+};
+
+/**
+ * @description - This Function is used to verify the token
+ * @param {string} token  - Otp or token generated by generateToken method
+ * @param {string} userId  - _id of the user record which is used as secret in GenerateToken function
+ * @returns {boolean} - Return boolean if token is verified or not
+ */
+
+const verifyToken = ({ token, userId = "" }) => {
+  return totp.verify({ token, secret: secret + String(userId) });
+};
+
+/**
+ * @param {number} time  - The date object/time
+ * @param {number} minutes  -The minute in number
+ * @returns {Date} - This returns the time after adding minutes to it
+ */
+
+const AddMinutesToDate = ({ time, minutes }) => {
+  return new Date(time.getTime() + minutes * 60000);
+};
+
+/**
+ * @description - This function is to check if id provided is valid mongoid or not
+ * @param {string} id -  the id to check if it is valid mongoid or not
+ * @returns {boolean} - returns the boolean whether the value is valid mongoId or not
+ */
+
+const isValidMongoId = (id) => {
+  return ObjectId.isValid(id); //true
+};
+
+/**
+ * @description - This function is used to find out difference between to date time object in minutes
+ * @param {Date} dt1 -This is the date time object of end time
+ * @param {Date} dt2 - This is the date time object of start time
+ * @returns {number} - This returns the number of minutes difference
+ */
+
+const minutesDifference = (dt1, dt2) => {
+  let diff = (dt1.getTime() - dt2.getTime()) / 1000;
+  diff /= 60;
+  return Math.abs(Math.ceil(diff));
+};
+
+/**
+ * @description - This function is used to return a date with end of the day time
+ * @param {Date} date -This is the date time
+ * @returns {Date} - This returns the date time object
+ */
+
+const getEodDate = (date) => {
+  let actualDate = new Date(date);
+  return new Date(
+    actualDate.getFullYear(),
+    actualDate.getMonth(),
+    actualDate.getDate(),
+    23,
+    59,
+    59
+  );
+};
+
+/**
+ * @description -
+ * @param {string} email
+ * @returns
+ */
+
+const isDisposableEmail = (email) => {
+  let arr = email.split("@");
+  let domain = arr[arr.length - 1];
+  return domains.includes(domain);
+};
+
+/**
+ * @description - This function is used to Generate an otp code/token
+ * @param {number} period  - Expiry Time in Seconds
+ * @param {number} digits  - Number of character/digits in otp
+ * @param {string} userId  - _id of the user record
+ * @returns {string} - Return an otp
+ */
+
+const generateOtpData = ({ userId = "" }) => {
+  let time = new Date();
+  const otp = generateToken({ period: otpPeriod, digits: otpDigits, userId });
+  const otpCreatedAt = time;
+  const otpExpiryTime = AddMinutesToDate({ time, minutes: 5 });
+  return { otp, otpCreatedAt, otpExpiryTime };
+};
+
+/**
+ * @description - This function is used for generating the email verification token
+ * @param {*} length
+ * @returns
+ */
+
+const generateVerificationToken = (length = 12) => {
+  return randomString.generate(length);
+};
+
+const validateEmail = (email) => {
+  const regex =
+    /^(([^<>()[\]\\.,;:\s@\"]+(\.[^<>()[\]\\.,;:\s@\"]+)*)|(\".+\"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/;
+  return regex.test(email);
+};
+
+/**
+ *
+ * @param {*} fields
+ * @param {*} body
+ * @returns
+ */
+const getDtoObject = (fields, body) => {
+  let returnObj = {};
+  fields.forEach((key) => {
+    if (body[key]) {
+      returnObj[key] = body[key];
+    }
+  });
+  return returnObj;
+};
+
+/**
+ *
+ * @param {*} token
+ * @returns
+ */
+const decodeToken = (token) => {
+  let decoded = jwt.verify(token, jwtSecret);
+  if (!decoded) {
+    throw new Unauthorized("Invalid Token");
+  }
+  return decoded;
+};
+
+/**
+ *
+ * @param {*} fileName
+ * @returns
+ */
+const getBucketFileUrl = (fileName = "default.jpg") => {
+  // make sure s3baseUrl has "/" at the end example : https://bucketname.s3.region.amazonaws.com/
+  return s3BaseUrl + fileName;
+};
+
+/**
+ * this function take date in dd-MM-yyyy format and return the general format
+ * @param {*} date
+ * @returns
+ */
+const changeDateFomate = (date) => {
+  const newDateArr = date.split("-");
+  const newDateInYearFormat = new Date(parseInt(newDateArr[2]), parseInt(newDateArr[1]) - 1, parseInt(newDateArr[0]));
+  var newDateIso = newDateInYearFormat.toISOString()
+  return newDateIso
+};
+
+/**
+ * this function take date and time in dd-MM-yyyy and hh-mm format and return the general format
+ * @param {*} date
+ * @param {*} time
+ * @returns
+ */
+const changeTimeFomate = (date, time) => {
+  const newDateArr = date.split("-");
+  const newTimeArr = time.split("-");
+  const newDateInYearFormat = new Date(parseInt(newDateArr[2]), parseInt(newDateArr[1]) - 1, parseInt(newDateArr[0]), parseInt(newTimeArr[0]), parseInt(newTimeArr[1]));
+  var newTime = newDateInYearFormat.toISOString()
+  return newTime
+};
+
+/**
+ * @param {*} ts
+ * @returns
+ */
+
+const getDateFromTimeStamp = (ts) => {
+  return new Date(ts * 1000);
+};
+
+module.exports = {
+  sendNotificationsTemplate,
+  sendNotification,
+  filterDate,
+  humanDate,
+  futureTimestamp,
+  generateToken,
+  generateJWTToken,
+  verifyToken,
+  AddMinutesToDate,
+  isValidMongoId,
+  minutesDifference,
+  getEodDate,
+  changeDateFomate,
+  isDisposableEmail,
+  generateOtpData,
+  generateVerificationToken,
+  validateEmail,
+  getDtoObject,
+  decodeToken,
+  getBucketFileUrl,
+  getDateFromTimeStamp,
+  changeTimeFomate
+};
